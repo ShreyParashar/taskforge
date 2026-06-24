@@ -39,3 +39,12 @@ func (id ID) String() string {
 func (id ID) IsZero() bool {
 	return id == ""
 }
+
+// Parse converts a string to an ID.
+// It does basic validation on length.
+func Parse(s string) (ID, error) {
+	if len(s) != 36 {
+		return "", fmt.Errorf("uid: invalid length for UUID: %d", len(s))
+	}
+	return ID(s), nil
+}

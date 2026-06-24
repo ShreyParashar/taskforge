@@ -97,7 +97,25 @@ func Load() (*Config, error) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	return cfg, nil
+}
+
+// Validate checks that the configuration has all required values.
+func (c *Config) Validate() error {
+	if c.DB.Host == "" {
+		return fmt.Errorf("database host is required")
+	}
+	if c.DB.User == "" {
+		return fmt.Errorf("database user is required")
+	}
+	if c.DB.DBName == "" {
+		return fmt.Errorf("database name is required")
+	}
+	return nil
 }
 
 // --- helper functions ---

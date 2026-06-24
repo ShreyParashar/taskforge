@@ -26,12 +26,15 @@ func NewRouter(store *storage.Store) *chi.Mux {
 	r.Route("/v1", func(r chi.Router) {
 		// Namespaces
 		r.Post("/namespaces", server.CreateNamespace)
+		r.Get("/namespaces/{namespace}", server.GetNamespace)
 		
 		// Queues
 		r.Post("/namespaces/{namespace}/queues", server.CreateQueue)
+		r.Get("/namespaces/{namespace}/queues/{queue}", server.GetQueue)
 		
 		// Jobs
 		r.Post("/namespaces/{namespace}/queues/{queue}/jobs", server.SubmitJob)
+		r.Get("/namespaces/{namespace}/queues/{queue}/jobs/{job_id}", server.GetJob)
 	})
 
 	return r

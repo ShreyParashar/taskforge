@@ -201,3 +201,83 @@ func (s *Server) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	render.Status(r, http.StatusAccepted)
 	render.JSON(w, r, models.MapJobToResponse(job))
 }
+
+// GetNamespace handles GET /v1/namespaces/{namespace}
+func (s *Server) GetNamespace(w http.ResponseWriter, r *http.Request) {
+	namespaceName := chi.URLParam(r, "namespace")
+	
+	ns, err := s.store.GetNamespaceByName(r.Context(), namespaceName)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to get namespace"))
+		}
+		return
+	}
+	
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, ns)
+}
+
+// GetQueue handles GET /v1/namespaces/{namespace}/queues/{queue}
+func (s *Server) GetQueue(w http.ResponseWriter, r *http.Request) {
+	namespaceName := chi.URLParam(r, "namespace")
+	queueName := chi.URLParam(r, "queue")
+
+	ns, err := s.store.GetNamespaceByName(r.Context(), namespaceName)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to look up namespace"))
+		}
+		return
+	}
+
+	q, err := s.store.GetQueueByName(r.Context(), ns.ID, queueName)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "queue not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to get queue"))
+		}
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, q)
+}
+
+// GetJob handles GET /v1/namespaces/{namespace}/queues/{queue}/jobs/{job_id}
+func (s *Server) GetJob(w http.ResponseWriter, r *http.Request) {
+	jobIDStr := chi.URLParam(r, "job_id")
+	
+	jobID, err := uid.Parse(jobIDStr)
+	if err != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, models.NewAPIError(err, "invalid job_id format"))
+		return
+	}
+
+	job, err := s.store.GetJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "job not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to get job"))
+		}
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, models.MapJobToResponse(job))
+}
