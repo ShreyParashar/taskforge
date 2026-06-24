@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -31,6 +33,7 @@ func (s *Server) Healthz(w http.ResponseWriter, r *http.Request) {
 
 // CreateNamespace handles POST /v1/namespaces
 func (s *Server) CreateNamespace(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var req models.CreateNamespaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		render.Status(r, http.StatusBadRequest)
@@ -66,11 +69,17 @@ func (s *Server) CreateQueue(w http.ResponseWriter, r *http.Request) {
 	// First, lookup the namespace to ensure it exists and get its ID
 	ns, err := s.store.GetNamespaceByName(r.Context(), namespaceName)
 	if err != nil {
-		render.Status(r, http.StatusNotFound)
-		render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to look up namespace"))
+		}
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var req models.CreateQueueRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		render.Status(r, http.StatusBadRequest)
@@ -88,7 +97,7 @@ func (s *Server) CreateQueue(w http.ResponseWriter, r *http.Request) {
 		NamespaceID:      ns.ID,
 		Name:             req.Name,
 		ConcurrencyLimit: req.ConcurrencyLimit,
-		RateLimitPerSec:  &req.RateLimitPerSec,
+		RateLimitPerSec:  req.RateLimitPerSec,
 		CreatedAt:        time.Now(),
 	}
 
@@ -109,18 +118,29 @@ func (s *Server) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	ns, err := s.store.GetNamespaceByName(r.Context(), namespaceName)
 	if err != nil {
-		render.Status(r, http.StatusNotFound)
-		render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "namespace not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to look up namespace"))
+		}
 		return
 	}
 
 	q, err := s.store.GetQueueByName(r.Context(), ns.ID, queueName)
 	if err != nil {
-		render.Status(r, http.StatusNotFound)
-		render.JSON(w, r, models.NewAPIError(err, "queue not found"))
+		if errors.Is(err, storage.ErrNotFound) {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, models.NewAPIError(err, "queue not found"))
+		} else {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, models.NewAPIError(err, "failed to look up queue"))
+		}
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 	var req models.SubmitJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		render.Status(r, http.StatusBadRequest)
@@ -165,15 +185,17 @@ func (s *Server) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create an initial timeline event
+	// Create an initial timeline event (non-critical — log failure, don't abort)
 	msg := "Job submitted via API"
-	_ = s.store.InsertTimelineEvent(r.Context(), &domain.TimelineEvent{
+	if tlErr := s.store.InsertTimelineEvent(r.Context(), &domain.TimelineEvent{
 		NamespaceID: ns.ID,
 		JobID:       &job.ID,
 		EventType:   domain.TimelineJobQueued,
 		Message:     &msg,
 		CreatedAt:   time.Now(),
-	})
+	}); tlErr != nil {
+		slog.Warn("Failed to insert timeline event", "job_id", job.ID, "error", tlErr)
+	}
 
 	render.Status(r, http.StatusAccepted)
 	render.JSON(w, r, models.MapJobToResponse(job))

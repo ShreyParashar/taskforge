@@ -28,11 +28,28 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
+	// The queue ID to listen on is required via environment variable.
+	// In production, this would typically be discovered via a queue name → ID lookup.
+	queueIDStr := os.Getenv("TASKFORGE_WORKER_QUEUE_ID")
+	if queueIDStr == "" {
+		log.Fatal("TASKFORGE_WORKER_QUEUE_ID environment variable is required")
+	}
+	queueID := uid.ID(queueIDStr)
+
+	workerID := os.Getenv("TASKFORGE_WORKER_ID")
+	if workerID == "" {
+		workerID = fmt.Sprintf("worker-%d", time.Now().UnixNano())
+	}
+
 	fmt.Println("===========================================")
 	fmt.Println("  TaskForge — Worker Pool")
 	fmt.Println("===========================================")
 	fmt.Printf("  Database:      %s:%d/%s\n", cfg.DB.Host, cfg.DB.Port, cfg.DB.DBName)
+	fmt.Printf("  Worker ID:     %s\n", workerID)
+	fmt.Printf("  Queue ID:      %s\n", queueID)
 	fmt.Printf("  Concurrency:   %d\n", cfg.Worker.ConcurrencyLimit)
+	fmt.Printf("  Poll interval: %s\n", cfg.Worker.PollInterval)
+	fmt.Printf("  Lease duration:%s\n", cfg.Worker.LeaseDuration)
 	fmt.Println("===========================================")
 	fmt.Println()
 
@@ -48,39 +65,39 @@ func main() {
 
 	// 4. Initialize Handler Registry
 	registry := handlers.NewRegistry()
-	
-	// Register the dummy echo handler for testing
+
+	// Register all job handlers here
 	registry.Register("echo", &handlers.EchoHandler{})
+	// registry.Register("send_email", &yourpackage.SendEmailHandler{})
 
 	// 5. Initialize the Worker Engine
-	// For testing, we just generate a random UUID for the queue we want to listen to.
-	// In reality, the worker would look up the queue ID by name or be configured with it.
-	// We'll pass a dummy queue ID for now, which we can override in tests.
-	testQueueID := uid.ID("queue-12345") // This will need to be a real queue ID in production
-	workerID := fmt.Sprintf("worker-%d", time.Now().Unix())
-
 	executor := worker.NewExecutor(store, registry, cfg.Worker.ConcurrencyLimit)
-	leaser := worker.NewLeaser(store, workerID, testQueueID, executor)
+	leaser := worker.NewLeaser(store, workerID, queueID, executor, worker.LeaserConfig{
+		LeaseDuration: cfg.Worker.LeaseDuration,
+		PollInterval:  cfg.Worker.PollInterval,
+	})
 
-	// 6. Graceful Shutdown & Run
+	// 6. Start the leaser in a background goroutine
 	go func() {
-		slog.Info("Starting Worker Leaser", "worker_id", workerID)
+		slog.Info("Starting Worker Leaser", "worker_id", workerID, "queue_id", queueID)
 		leaser.Start(ctx)
 	}()
 
+	// 7. Graceful Shutdown — wait for OS signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-
-	// Block until signal is received
 	<-quit
-	slog.Info("Worker is shutting down gracefully...")
-	
-	// Stop the leaser from picking up new jobs
+
+	slog.Info("Shutdown signal received — stopping leaser and draining active jobs...")
+
+	// Step 1: Cancel the context — stops the leaser from picking up new jobs
 	cancel()
 
-	// Give the executor time to finish running active jobs (drain)
-	slog.Info("Waiting for active jobs to finish (drain)...")
-	time.Sleep(2 * time.Second) // In a real system, we'd use a WaitGroup in the executor
+	// Step 2: Wait for all in-flight goroutines to finish (WaitGroup drain)
+	// The executor uses context.Background() for DB writes, so they will complete
+	// even after cancel() is called.
+	executor.Drain()
 
+	// store.Close() is called via defer after Drain() returns — safe ordering.
 	slog.Info("Worker exited gracefully")
 }

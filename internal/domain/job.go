@@ -46,6 +46,16 @@ type Job struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// RetryPolicy returns the retry configuration for this job.
+func (j *Job) RetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxAttempts:  j.MaxAttempts,
+		BaseBackoff:  2 * time.Second,
+		MaxBackoff:   5 * time.Minute,
+		JitterFactor: 0.2,
+	}
+}
+
 // JobAttempt records a single execution attempt of a job.
 // Each time a worker leases and runs a job, an attempt row is created.
 // This provides a full audit trail: which worker ran it, how long it took,
@@ -85,4 +95,9 @@ func DefaultRetryPolicy() RetryPolicy {
 // based on the current attempt count and the retry policy.
 func (p RetryPolicy) ShouldRetry(attemptCount int) bool {
 	return attemptCount < p.MaxAttempts
+}
+
+// NextRetryAt returns the absolute time for the next retry attempt.
+func (p RetryPolicy) NextRetryAt(attemptCount int) time.Time {
+	return time.Now().Add(CalculateBackoff(attemptCount, p))
 }

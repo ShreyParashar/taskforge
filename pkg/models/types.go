@@ -25,7 +25,7 @@ func (req *CreateNamespaceRequest) Validate() error {
 type CreateQueueRequest struct {
 	Name             string `json:"name"`
 	ConcurrencyLimit int    `json:"concurrency_limit"`
-	RateLimitPerSec  int    `json:"rate_limit_per_second"`
+	RateLimitPerSec  *int   `json:"rate_limit_per_second,omitempty"`
 }
 
 func (req *CreateQueueRequest) Validate() error {

@@ -2,11 +2,18 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"taskforge/internal/domain"
 	"taskforge/internal/domain/uid"
 )
+
+// ErrNotFound is returned when a requested record does not exist in the database.
+var ErrNotFound = errors.New("storage: record not found")
 
 // --- Namespaces ---
 
@@ -33,6 +40,9 @@ func (s *Store) GetNamespaceByName(ctx context.Context, name string) (*domain.Na
 	ns := &domain.Namespace{}
 	err := s.pool.QueryRow(ctx, query, name).Scan(&ns.ID, &ns.Name, &ns.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("namespace %q: %w", name, ErrNotFound)
+		}
 		return nil, fmt.Errorf("storage: failed to get namespace %q: %w", name, err)
 	}
 	return ns, nil
@@ -65,6 +75,9 @@ func (s *Store) GetQueueByName(ctx context.Context, namespaceID uid.ID, name str
 		&q.ID, &q.NamespaceID, &q.Name, &q.ConcurrencyLimit, &q.RateLimitPerSec, &q.CreatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("queue %q: %w", name, ErrNotFound)
+		}
 		return nil, fmt.Errorf("storage: failed to get queue %q: %w", name, err)
 	}
 	return q, nil
@@ -110,6 +123,9 @@ func (s *Store) GetJob(ctx context.Context, id uid.ID) (*domain.Job, error) {
 		&j.LastError, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("job %s: %w", id, ErrNotFound)
+		}
 		return nil, fmt.Errorf("storage: failed to get job %s: %w", id, err)
 	}
 	return j, nil
@@ -129,6 +145,105 @@ func (s *Store) UpdateJobStatus(ctx context.Context, id uid.ID, status domain.Jo
 	return nil
 }
 
+// FailJob marks a running job as failed (last attempt exhausted → dead_lettered,
+// or still has retries → failed so the reaper can reschedule it).
+// It validates the lease token to guard against stale workers.
+func (s *Store) FailJob(ctx context.Context, jobID uid.ID, leaseToken uid.ID, errMsg string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("storage: failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Read current attempt info to decide whether to dead-letter.
+	var attemptCount, maxAttempts int
+	err = tx.QueryRow(ctx,
+		`SELECT attempt_count, max_attempts FROM jobs WHERE id = $1 AND lease_token = $2`,
+		jobID, leaseToken,
+	).Scan(&attemptCount, &maxAttempts)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrStaleLease
+		}
+		return fmt.Errorf("storage: failed to read job for failure: %w", err)
+	}
+
+	newStatus := domain.JobStatusRetryScheduled
+	if attemptCount >= maxAttempts {
+		newStatus = domain.JobStatusDeadLettered
+	}
+
+	updateQuery := `
+		UPDATE jobs
+		SET status = $1,
+		    last_error = $2,
+		    locked_by = NULL,
+		    lease_token = NULL,
+		    locked_until = NULL,
+		    updated_at = NOW()
+		WHERE id = $3 AND lease_token = $4
+	`
+	cmdTag, err := tx.Exec(ctx, updateQuery, newStatus, errMsg, jobID, leaseToken)
+	if err != nil {
+		return fmt.Errorf("storage: failed to fail job: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrStaleLease
+	}
+
+	// Update the attempt record
+	_, err = tx.Exec(ctx,
+		`UPDATE job_attempts SET status = 'failed', finished_at = NOW(), error = $1
+		 WHERE job_id = $2 AND lease_token = $3`,
+		errMsg, jobID, leaseToken,
+	)
+	if err != nil {
+		return fmt.Errorf("storage: failed to update attempt record: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// ScheduleRetry transitions a failed job back to 'queued' with a future run_at
+// for exponential backoff retries.
+func (s *Store) ScheduleRetry(ctx context.Context, jobID uid.ID, leaseToken uid.ID, runAt time.Time, errMsg string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("storage: failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	updateQuery := `
+		UPDATE jobs
+		SET status = 'queued',
+		    run_at = $1,
+		    last_error = $2,
+		    locked_by = NULL,
+		    lease_token = NULL,
+		    locked_until = NULL,
+		    updated_at = NOW()
+		WHERE id = $3 AND lease_token = $4 AND status = 'running'
+	`
+	cmdTag, err := tx.Exec(ctx, updateQuery, runAt, errMsg, jobID, leaseToken)
+	if err != nil {
+		return fmt.Errorf("storage: failed to schedule retry: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrStaleLease
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE job_attempts SET status = 'failed', finished_at = NOW(), error = $1
+		 WHERE job_id = $2 AND lease_token = $3`,
+		errMsg, jobID, leaseToken,
+	)
+	if err != nil {
+		return fmt.Errorf("storage: failed to update attempt on retry: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
 // --- Timeline ---
 
 // InsertTimelineEvent appends a new event to the timeline log.
@@ -141,7 +256,7 @@ func (s *Store) InsertTimelineEvent(ctx context.Context, e *domain.TimelineEvent
 	err := s.pool.QueryRow(ctx, query,
 		e.NamespaceID, e.WorkflowID, e.JobID, e.EventType, e.Message, e.Payload, e.CreatedAt,
 	).Scan(&e.ID)
-	
+
 	if err != nil {
 		return fmt.Errorf("storage: failed to insert timeline event: %w", err)
 	}
