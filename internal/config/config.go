@@ -51,6 +51,7 @@ type ServerConfig struct {
 
 // WorkerConfig holds worker runtime parameters.
 type WorkerConfig struct {
+	ConcurrencyLimit  int
 	LeaseDuration     time.Duration
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
@@ -85,6 +86,7 @@ func Load() (*Config, error) {
 			WriteTimeout: envDurationOrDefault("TASKFORGE_SERVER_WRITE_TIMEOUT", 30*time.Second),
 		},
 		Worker: WorkerConfig{
+			ConcurrencyLimit:  envIntOrDefault("TASKFORGE_WORKER_CONCURRENCY", 10),
 			LeaseDuration:     envDurationOrDefault("TASKFORGE_WORKER_LEASE_DURATION", 60*time.Second),
 			HeartbeatInterval: envDurationOrDefault("TASKFORGE_WORKER_HEARTBEAT_INTERVAL", 15*time.Second),
 			PollInterval:      envDurationOrDefault("TASKFORGE_WORKER_POLL_INTERVAL", 1*time.Second),
