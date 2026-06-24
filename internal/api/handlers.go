@@ -192,6 +192,7 @@ func (s *Server) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		JobID:       &job.ID,
 		EventType:   domain.TimelineJobQueued,
 		Message:     &msg,
+		Payload:     []byte("{}"),
 		CreatedAt:   time.Now(),
 	}); tlErr != nil {
 		slog.Warn("Failed to insert timeline event", "job_id", job.ID, "error", tlErr)

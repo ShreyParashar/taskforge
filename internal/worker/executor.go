@@ -102,6 +102,7 @@ func (e *Executor) runJob(ctx context.Context, job *domain.Job) {
 		JobID:       &job.ID,
 		EventType:   domain.TimelineJobSucceeded,
 		Message:     &msg,
+		Payload:     []byte("{}"),
 		CreatedAt:   time.Now(),
 	}); tlErr != nil {
 		slog.Warn("Failed to insert success timeline event", "job_id", job.ID, "error", tlErr)
@@ -130,15 +131,17 @@ func (e *Executor) failOrRetry(job *domain.Job, errMsg string) {
 			slog.Error("Failed to schedule job retry", "job_id", job.ID, "error", err)
 		}
 
-		// Non-critical: timeline event
-		msg := "Job scheduled for retry"
-		_ = e.store.InsertTimelineEvent(writeCtx, &domain.TimelineEvent{
+		retryMsg := "Job scheduled for retry"
+		if err := e.store.InsertTimelineEvent(writeCtx, &domain.TimelineEvent{
 			NamespaceID: job.NamespaceID,
 			JobID:       &job.ID,
 			EventType:   domain.TimelineJobRetryScheduled,
-			Message:     &msg,
+			Message:     &retryMsg,
+			Payload:     []byte("{}"),
 			CreatedAt:   time.Now(),
-		})
+		}); err != nil {
+			slog.Warn("Failed to insert retry timeline event", "job_id", job.ID)
+		}
 		return
 	}
 
@@ -148,14 +151,17 @@ func (e *Executor) failOrRetry(job *domain.Job, errMsg string) {
 	}
 
 	// Non-critical: timeline event
-	msg := "Job dead-lettered after exhausting retries"
-	_ = e.store.InsertTimelineEvent(writeCtx, &domain.TimelineEvent{
+	msg2 := "Job dead-lettered after exhausting retries"
+	if err := e.store.InsertTimelineEvent(writeCtx, &domain.TimelineEvent{
 		NamespaceID: job.NamespaceID,
 		JobID:       &job.ID,
 		EventType:   domain.TimelineJobDeadLettered,
-		Message:     &msg,
+		Message:     &msg2,
+		Payload:     []byte("{}"),
 		CreatedAt:   time.Now(),
-	})
+	}); err != nil {
+		slog.Warn("Failed to insert dead-letter timeline event", "job_id", job.ID)
+	}
 }
 
 // Drain waits until all currently in-flight jobs have finished executing.
