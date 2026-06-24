@@ -1,0 +1,149 @@
+package storage
+
+import (
+	"context"
+	"fmt"
+
+	"taskforge/internal/domain"
+	"taskforge/internal/domain/uid"
+)
+
+// --- Namespaces ---
+
+// CreateNamespace inserts a new namespace into the database.
+func (s *Store) CreateNamespace(ctx context.Context, ns *domain.Namespace) error {
+	query := `
+		INSERT INTO namespaces (id, name, created_at)
+		VALUES ($1, $2, $3)
+	`
+	_, err := s.pool.Exec(ctx, query, ns.ID, ns.Name, ns.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("storage: failed to create namespace: %w", err)
+	}
+	return nil
+}
+
+// GetNamespaceByName retrieves a namespace by its name.
+func (s *Store) GetNamespaceByName(ctx context.Context, name string) (*domain.Namespace, error) {
+	query := `
+		SELECT id, name, created_at
+		FROM namespaces
+		WHERE name = $1
+	`
+	ns := &domain.Namespace{}
+	err := s.pool.QueryRow(ctx, query, name).Scan(&ns.ID, &ns.Name, &ns.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("storage: failed to get namespace %q: %w", name, err)
+	}
+	return ns, nil
+}
+
+// --- Queues ---
+
+// CreateQueue inserts a new queue into the database.
+func (s *Store) CreateQueue(ctx context.Context, q *domain.Queue) error {
+	query := `
+		INSERT INTO queues (id, namespace_id, name, concurrency_limit, rate_limit_per_second, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err := s.pool.Exec(ctx, query, q.ID, q.NamespaceID, q.Name, q.ConcurrencyLimit, q.RateLimitPerSec, q.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("storage: failed to create queue: %w", err)
+	}
+	return nil
+}
+
+// GetQueueByName retrieves a queue by its namespace and name.
+func (s *Store) GetQueueByName(ctx context.Context, namespaceID uid.ID, name string) (*domain.Queue, error) {
+	query := `
+		SELECT id, namespace_id, name, concurrency_limit, rate_limit_per_second, created_at
+		FROM queues
+		WHERE namespace_id = $1 AND name = $2
+	`
+	q := &domain.Queue{}
+	err := s.pool.QueryRow(ctx, query, namespaceID, name).Scan(
+		&q.ID, &q.NamespaceID, &q.Name, &q.ConcurrencyLimit, &q.RateLimitPerSec, &q.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("storage: failed to get queue %q: %w", name, err)
+	}
+	return q, nil
+}
+
+// --- Jobs ---
+
+// CreateJob inserts a new job into the database.
+func (s *Store) CreateJob(ctx context.Context, j *domain.Job) error {
+	query := `
+		INSERT INTO jobs (
+			id, namespace_id, queue_id, workflow_id, workflow_step_id,
+			type, payload, status, priority, run_at, idempotency_key,
+			max_attempts, attempt_count, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	`
+	_, err := s.pool.Exec(ctx, query,
+		j.ID, j.NamespaceID, j.QueueID, j.WorkflowID, j.WorkflowStepID,
+		j.Type, j.Payload, j.Status, j.Priority, j.RunAt, j.IdempotencyKey,
+		j.MaxAttempts, j.AttemptCount, j.CreatedAt, j.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("storage: failed to create job: %w", err)
+	}
+	return nil
+}
+
+// GetJob retrieves a job by its ID.
+func (s *Store) GetJob(ctx context.Context, id uid.ID) (*domain.Job, error) {
+	query := `
+		SELECT id, namespace_id, queue_id, workflow_id, workflow_step_id,
+		       type, payload, status, priority, run_at, idempotency_key,
+		       max_attempts, attempt_count, locked_by, lease_token, locked_until,
+		       last_error, created_at, updated_at
+		FROM jobs
+		WHERE id = $1
+	`
+	j := &domain.Job{}
+	err := s.pool.QueryRow(ctx, query, id).Scan(
+		&j.ID, &j.NamespaceID, &j.QueueID, &j.WorkflowID, &j.WorkflowStepID,
+		&j.Type, &j.Payload, &j.Status, &j.Priority, &j.RunAt, &j.IdempotencyKey,
+		&j.MaxAttempts, &j.AttemptCount, &j.LockedBy, &j.LeaseToken, &j.LockedUntil,
+		&j.LastError, &j.CreatedAt, &j.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("storage: failed to get job %s: %w", id, err)
+	}
+	return j, nil
+}
+
+// UpdateJobStatus updates the status and updated_at timestamp of a job.
+func (s *Store) UpdateJobStatus(ctx context.Context, id uid.ID, status domain.JobStatus) error {
+	query := `
+		UPDATE jobs
+		SET status = $1, updated_at = NOW()
+		WHERE id = $2
+	`
+	_, err := s.pool.Exec(ctx, query, status, id)
+	if err != nil {
+		return fmt.Errorf("storage: failed to update job status: %w", err)
+	}
+	return nil
+}
+
+// --- Timeline ---
+
+// InsertTimelineEvent appends a new event to the timeline log.
+func (s *Store) InsertTimelineEvent(ctx context.Context, e *domain.TimelineEvent) error {
+	query := `
+		INSERT INTO timeline_events (namespace_id, workflow_id, job_id, event_type, message, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id
+	`
+	err := s.pool.QueryRow(ctx, query,
+		e.NamespaceID, e.WorkflowID, e.JobID, e.EventType, e.Message, e.Payload, e.CreatedAt,
+	).Scan(&e.ID)
+	
+	if err != nil {
+		return fmt.Errorf("storage: failed to insert timeline event: %w", err)
+	}
+	return nil
+}
